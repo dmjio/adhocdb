@@ -1,4 +1,4 @@
-module Welcome (welcome) where
+module Welcome (welcomeMsg) where
 
 logo  =   "               __   __                        __ __    \n" ++
           "   ____ _ ____/ /  / /_   ____   _____   ____/ // /_   \n" ++
@@ -6,5 +6,5 @@ logo  =   "               __   __                        __ __    \n" ++
           " / /_/ // /_/ /  / / / // /_/ // /__   / /_/ // /_/ /  \n" ++
           " \\__ _/ \\__ _/  /_/ /_/ \\____/ \\___/   \\__ _//_ ___/   \n\n" 
 
-welcome = logo ++ "\t   Welcome to adhocdb version 1.0"
+welcomeMsg = logo ++ "\t   Welcome to adhocdb version 1.0\n"
 
