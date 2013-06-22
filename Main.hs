@@ -1,128 +1,96 @@
+{-# LANGUAGE OverloadedStrings, TypeFamilies, DeriveDataTypeable, TemplateHaskell, GeneralizedNewtypeDeriving, DeriveGeneric #-}
+
 module Main where
 
-import System.Directory (doesDirectoryExist, createDirectory, getDirectoryContents)
-import System.Environment
-import System.IO
-import Network.HTTP (simpleHTTP, getRequest, getResponseBody)
-import qualified Data.Map as M 
-import System.FilePath (takeExtension)
-import Control.Monad (forever, when, liftM)
+import Data.Aeson
+import Data.Acid
+import Data.SafeCopy
+import Control.Concurrent (forkIO)
 import Control.Monad.Trans (liftIO)
-import Control.Monad.Trans.State
-import Data.List.Split (splitOn)
-import Data.List
-import Data.IORef
+import qualified Web.Scotty as W
+import Network.Wai.Middleware.Static
+import Control.Monad.State (put)
+import Control.Monad.Reader (ask)
+import System.IO
 import Welcome (welcomeMsg)
 import Eval
-import CSV
 import Data
 import SQL
+import Data.Data
+
+newtype Database = Database [DB] deriving (Show, Eq, Ord, Typeable)
+
+-- | Acid state transaction methods
+updateDB :: [DB] -> Update Database ()
+updateDB dbs = put $ Database dbs
+
+getDB :: Query Database [DB]
+getDB = do Database dbs <- ask
+           return dbs
+
+-- | Safe Copy instances
+$(deriveSafeCopy 0 'base ''Database)
+$(deriveSafeCopy 0 'base ''DB)
+$(deriveSafeCopy 0 'base ''Table)
+$(deriveSafeCopy 0 'base ''AValue)
+$(deriveSafeCopy 0 'base ''Type)
+
+-- | Make data types serializeable
+$(makeAcidic ''Database ['updateDB, 'getDB])
+
+-- | JSON Instances
+instance ToJSON DB
+instance ToJSON Table
+instance ToJSON AValue
+instance ToJSON Type
 
 -- | Welcome message
 welcome :: IO ()
 welcome = putStrLn welcomeMsg
 
--- | Network file retrieval
-networkReq :: IO String
-networkReq = do
-  url <- getLine {- TODO: error handling here, transformer -}
-  rsp <- simpleHTTP $ getRequest url
-  body <- getResponseBody rsp
-  return body
-
--- | Initial State
-type Stater = State (M.Map Name Table) (M.Map Name Table)
-
--- | Function to add a table
-addDB :: Name -> Table -> Stater
-addDB name table = do
-  map <- get
-  put $ M.insert name table map 
-  return map
-
--- | File importer
-import' :: AdHocState 
-import' = do 
-  liftIO $ putStrLn "(c) - csv"
-  char <- liftIO getLine
-  case char of
-    "c" -> do
-      liftIO $ putStrLn "Is this from (w) - web or (f) - file?"
-      result <- liftIO getLine
-      case result of
-        "f" -> do
-          liftIO $ putStrLn "Please enter the file path on your desktop i.e. ~/Desktop/example.csv"
-          path <- liftIO getLine
-          file <- liftIO $ readFile path
-          liftIO $ print file
-          let csv = parseCSV path file
-          liftIO $ print csv
-          return ()
-        otherwise -> liftIO $ putStrLn "unrecognized" >> return ()
-
--- |DB Display
-show' :: AdHocState 
-show' = do
-  dbs <- get
-  liftIO $ putStrLn $ show dbs
-  
--- |Static File Location
-dir :: String
-dir = "AdHocDBs"
-
--- |Helper Function for checking custom file name
-isADB :: String -> Bool
-isADB = (==".adb") . takeExtension
-
-initDB :: AdHocState
-initDB = do 
-  exists <- liftIO $ doesDirectoryExist dir
-  if exists
-     then do files <- liftIO $ getDirectoryContents dir
-             let filtered = filter isADB files
-             if null filtered {- If null then db's empty -}
-               then do return ()
-                  else do
-                    liftIO $ putStrLn "\tTODO: Fill" {- otherwise files exist, suck them up, TODO : Implement -}
-                    liftIO $ print filtered
-                    map <- get
-                    liftIO $ print map
-     else do liftIO $ createDirectory dir
-
+-- | Flush buffer output
 flushStr :: String -> IO ()
-flushStr str = putStr str >> hFlush stdout
+flushStr str = hSetBuffering stdout LineBuffering >>
+               putStr str >> hFlush stdout
 
+-- | Read from stdin
 readPrompt :: String -> IO String
 readPrompt prompt = flushStr prompt >> getLine
 
+-- | Custom control.monad helper
 until_ pred prompt action = do 
   result <- prompt
   if pred result 
      then return ()
      else action result >> until_ pred prompt action
 
-type Env = IORef [DB]
-type AdHocState = StateT (M.Map String String) IO ()
-
-evalAndPrint :: IORef [DB] -> String -> IO ()
-evalAndPrint ref expr = do
-  dbs <- readIORef ref
-  let (result, modified) = eval dbs (parseSQL expr)
-  liftIO $ putStrLn result
-  writeIORef ref modified
-
-runRepl :: IORef [DB] -> IO ()
+-- | Eval loop
+evalAndPrint db expr = do
+  dbs <- query db GetDB
+  let (result, dbs') = eval dbs (parseSQL expr)
+  update db (UpdateDB dbs')
+  putStrLn result
+  
+-- | REPL
 runRepl ref = until_ (== "quit") (readPrompt "λ: ") (evalAndPrint ref)
 
+-- | Main method
 main :: IO ()
 main = do
-  let map = M.empty :: M.Map String String
-  runStateT initDB map >> welcome
-  args <- getArgs
-  ref <- newIORef []
-  case length args of
-    0 -> runRepl ref 
-    1 -> evalAndPrint ref (args !! 0)
-    otherwise -> putStrLn "Program takes only 0 or 1 argument"
+  welcome 
+  db <- openLocalStateFrom "dbs/" (Database [])
+  dbs <- query db GetDB
+  forkIO $ runRepl db      
+  W.scotty 3000 $ do
+    W.middleware $ staticPolicy (noDots >-> addBase "static")
+    W.get "/" $
+      W.file "index.html"
+    W.get "/query" $ do
+      dbs <- liftIO $ query db GetDB
+      W.json $ dbs
 
+
+
+
+    
 
